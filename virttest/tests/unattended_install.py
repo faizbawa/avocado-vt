@@ -954,6 +954,64 @@ class UnattendedInstallConfig(object):
                 self.answer_windows_xml(answer_path)
 
                 boot_disk.copy_to(self.finish_program)
+                # aarch64: cdroms omit winutils, but Autounattend calls E:\setuprss6.bat.
+                # Inject a working RSS6 onto the unattended ISO (drive E:) so boot login works.
+                if self.params.get("inject_rss_to_unattended") == "yes":
+                    import tempfile
+
+                    # Match x86 winutils setuprss.bat / deps/rss/setuprss6.bat:
+                    # Autounattend first logon stays Kvm_autotest; FirstLogonCommands
+                    # then set account + AutoLogon + rss6.reg all to 1q2w3eP.
+                    rss_dir = os.path.join(
+                        os.path.dirname(os.path.dirname(self.finish_program)), "rss"
+                    )
+                    for fname in ("rss6.exe", "rss6.reg"):
+                        src = os.path.join(rss_dir, fname)
+                        if os.path.isfile(src):
+                            boot_disk.copy_to(src)
+                    password = "1q2w3eP"
+                    bat_lines = [
+                        "@echo off",
+                        r"copy /Y %~dp0rss6.exe C:\rss6.exe",
+                        "net user Administrator /active:yes",
+                        "net user Administrator %s" % password,
+                        "netsh firewall set opmode disable",
+                        "netsh advfirewall set allprofiles state off",
+                        r"netsh interface ipv6 set global randomizeidentifiers=disabled",
+                        (
+                            r'reg add "HKLM\Software\Microsoft\Windows\CurrentVersion\Run" '
+                            r'/v "Remote Shell Server IPv6" /d "C:\rss6.exe" /t REG_SZ /f'
+                        ),
+                        (
+                            r'reg add "HKLM\Software\Microsoft\Windows NT\CurrentVersion\winlogon" '
+                            r'/v "AutoAdminLogon" /d "1" /t REG_SZ /f'
+                        ),
+                        (
+                            r'reg add "HKLM\Software\Microsoft\Windows NT\CurrentVersion\winlogon" '
+                            r'/v "DefaultUserName" /d "Administrator" /t REG_SZ /f'
+                        ),
+                        (
+                            r'reg add "HKLM\Software\Microsoft\Windows NT\CurrentVersion\winlogon" '
+                            r'/v "DefaultPassword" /d "%s" /t REG_SZ /f' % password
+                        ),
+                        (
+                            r'reg add "HKLM\Software\Microsoft\Windows\CurrentVersion\Policies\System" '
+                            r'/v "EnableLUA" /d "0" /t REG_DWORD /f'
+                        ),
+                        r"if exist %~dp0rss6.reg regedit /s %~dp0rss6.reg",
+                        r"start /B C:\rss6.exe",
+                    ]
+                    fd, bat_path = tempfile.mkstemp(prefix="setuprss6_", suffix=".bat")
+                    os.close(fd)
+                    dest_bat = os.path.join(os.path.dirname(bat_path), "setuprss6.bat")
+                    os.rename(bat_path, dest_bat)
+                    with open(dest_bat, "w", newline="\r\n") as bat_f:
+                        bat_f.write("\n".join(bat_lines) + "\n")
+                    boot_disk.copy_to(dest_bat)
+                    try:
+                        os.unlink(dest_bat)
+                    except OSError:
+                        pass
 
         else:
             raise ValueError("Unknown answer file type: %s" % self.unattended_file)
